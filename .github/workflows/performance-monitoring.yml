@@ -1,0 +1,118 @@
+name: 📊 Performance & Load Testing
+
+on:
+  schedule:
+    # Run performance tests daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: 'URL to test'
+        required: true
+        default: 'https://your-patient-facing-url.vercel.app'
+      concurrent_users:
+        description: 'Number of concurrent users'
+        required: true
+        default: '50'
+
+jobs:
+  # =====================================================
+  # LIGHTHOUSE PERFORMANCE AUDIT
+  # =====================================================
+  lighthouse-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🔍 Lighthouse CI
+        uses: treosh/lighthouse-ci-action@v10
+        with:
+          urls: |
+            ${{ github.event.inputs.target_url || secrets.PATIENT_FACING_URL }}
+            ${{ github.event.inputs.target_url || secrets.PATIENT_FACING_URL }}/book
+            ${{ github.event.inputs.target_url || secrets.PATIENT_FACING_URL }}/services
+          configPath: './.lighthouserc.json'
+          uploadArtifacts: true
+          temporaryPublicStorage: true
+
+  # =====================================================
+  # LOAD TESTING WITH K6
+  # =====================================================
+  load-testing:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🏋️ Run k6 load test
+        uses: grafana/k6-action@v0.3.1
+        with:
+          filename: .github/scripts/load-test.js
+        env:
+          TARGET_URL: ${{ github.event.inputs.target_url || secrets.PATIENT_FACING_URL }}
+          CONCURRENT_USERS: ${{ github.event.inputs.concurrent_users || '50' }}
+
+      - name: 📊 Upload load test results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: load-test-results
+          path: results/
+
+  # =====================================================
+  # DATABASE PERFORMANCE MONITORING
+  # =====================================================
+  database-performance:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 📦 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: 🗄️ Database performance check
+        run: |
+          npm install @supabase/supabase-js
+          node .github/scripts/db-performance-check.js
+        env:
+          SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+  # =====================================================
+  # UPTIME MONITORING
+  # =====================================================
+  uptime-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🔍 Check patient-facing uptime
+        run: |
+          response=$(curl -s -o /dev/null -w "%{http_code}" ${{ secrets.PATIENT_FACING_URL }})
+          if [ $response -ne 200 ]; then
+            echo "❌ Patient-facing site is down (HTTP $response)"
+            exit 1
+          else
+            echo "✅ Patient-facing site is up (HTTP $response)"
+          fi
+
+      - name: 🔍 Check admin-facing uptime
+        run: |
+          response=$(curl -s -o /dev/null -w "%{http_code}" ${{ secrets.ADMIN_FACING_URL }})
+          if [ $response -ne 200 ]; then
+            echo "❌ Admin-facing site is down (HTTP $response)"
+            exit 1
+          else
+            echo "✅ Admin-facing site is up (HTTP $response)"
+          fi
+
+      - name: 📧 Alert on downtime
+        if: failure()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: failure
+          text: '🚨 Dental website is experiencing downtime!'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

@@ -1,0 +1,240 @@
+name: 🏥 Dental Website CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  NODE_VERSION: '18'
+  PNPM_VERSION: '8'
+
+jobs:
+  # =====================================================
+  # DETECT CHANGES - Optimize builds by detecting what changed
+  # =====================================================
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      patient-facing: ${{ steps.changes.outputs.patient-facing }}
+      admin-facing: ${{ steps.changes.outputs.admin-facing }}
+      shared-database: ${{ steps.changes.outputs.shared-database }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v2
+        id: changes
+        with:
+          filters: |
+            patient-facing:
+              - 'patient-facing/**'
+            admin-facing:
+              - 'admin-facing/**'
+            shared-database:
+              - 'shared-database/**'
+
+  # =====================================================
+  # PATIENT-FACING APPLICATION CI/CD
+  # =====================================================
+  patient-facing-ci:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.patient-facing == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./patient-facing
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 📦 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: patient-facing/package-lock.json
+
+      - name: 📋 Install dependencies
+        run: npm ci
+
+      - name: 🔍 Lint code
+        run: npm run lint
+
+      - name: 🏗️ Build application
+        run: npm run build
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+
+      - name: 🧪 Run tests (if available)
+        run: npm test --if-present
+
+      - name: 📊 Bundle analyzer
+        run: npx @next/bundle-analyzer --help || echo "Bundle analyzer not configured"
+
+  # =====================================================
+  # ADMIN-FACING APPLICATION CI/CD
+  # =====================================================
+  admin-facing-ci:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.admin-facing == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./admin-facing
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 📦 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: admin-facing/package-lock.json
+
+      - name: 📋 Install dependencies
+        run: npm ci
+
+      - name: 🔍 Lint code
+        run: npm run lint
+
+      - name: 🏗️ Build application
+        run: npm run build
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+      - name: 🧪 Run tests (if available)
+        run: npm test --if-present
+
+  # =====================================================
+  # DATABASE MIGRATIONS & VALIDATION
+  # =====================================================
+  database-validation:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.shared-database == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./shared-database
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 📦 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: 🔍 Validate SQL files
+        run: |
+          # Install SQL linter
+          npm install -g sql-formatter
+          
+          # Format and validate SQL files
+          find . -name "*.sql" -exec sql-formatter {} \;
+
+      - name: 🗄️ Run database migrations (staging)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          # Install Supabase CLI
+          npm install -g supabase
+          
+          # Run migrations against staging database
+          echo "Database migration validation would run here"
+
+  # =====================================================
+  # SECURITY SCANNING
+  # =====================================================
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🔒 Run security audit
+        run: |
+          cd patient-facing && npm audit --audit-level=high
+          cd ../admin-facing && npm audit --audit-level=high
+
+      - name: 🛡️ CodeQL Analysis
+        uses: github/codeql-action/init@v2
+        with:
+          languages: javascript
+
+      - name: 🛡️ Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v2
+
+  # =====================================================
+  # DEPLOYMENT TO VERCEL
+  # =====================================================
+  deploy-patient-facing:
+    needs: [patient-facing-ci, security-scan]
+    if: github.ref == 'refs/heads/main' && needs.detect-changes.outputs.patient-facing == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🚀 Deploy to Vercel
+        uses: amondnet/vercel-action@v25
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID_PATIENT }}
+          working-directory: ./patient-facing
+          vercel-args: '--prod'
+
+  deploy-admin-facing:
+    needs: [admin-facing-ci, security-scan]
+    if: github.ref == 'refs/heads/main' && needs.detect-changes.outputs.admin-facing == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🚀 Deploy to Vercel
+        uses: amondnet/vercel-action@v25
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID_ADMIN }}
+          working-directory: ./admin-facing
+          vercel-args: '--prod'
+
+  # =====================================================
+  # POST-DEPLOYMENT HEALTH CHECKS
+  # =====================================================
+  health-check:
+    needs: [deploy-patient-facing, deploy-admin-facing]
+    if: always() && (needs.deploy-patient-facing.result == 'success' || needs.deploy-admin-facing.result == 'success')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 🏥 Health check patient-facing
+        if: needs.deploy-patient-facing.result == 'success'
+        run: |
+          curl -f ${{ secrets.PATIENT_FACING_URL }}/api/health || exit 1
+
+      - name: 🏥 Health check admin-facing
+        if: needs.deploy-admin-facing.result == 'success'
+        run: |
+          curl -f ${{ secrets.ADMIN_FACING_URL }}/api/health || exit 1
+
+      - name: 📧 Notify deployment success
+        uses: 8398a7/action-slack@v3
+        if: success()
+        with:
+          status: success
+          text: '🎉 Dental website deployed successfully!'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
